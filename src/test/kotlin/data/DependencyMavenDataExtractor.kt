@@ -94,24 +94,26 @@ class DependencyMavenDataExtractor {
 
         val queries = LETTERS.map { it.toString() }.toMutableList().also { it.addAll(twoLetterCombination) }
 
-        queries.forEachIndexed { index, query ->
-            println("Parsing maven central search index: ${index * 100.0 / queries.size} %")
+        queries
+            .forEachIndexed { index, query ->
+                if (index % 10 == 0) // every N request
+                    println("Parsing maven central search index: ${index * 100.0 / queries.size} %")
 
-            val request =
-                HttpRequest.newBuilder(URI("https://search.maven.org/solrsearch/select?q=$query&rows=10000&wt=json"))
-                    .GET()
-                    .build()
+                val request =
+                    HttpRequest.newBuilder(URI("https://search.maven.org/solrsearch/select?q=$query&rows=10000&wt=json"))
+                        .GET()
+                        .build()
 
 //                    println("Request: ${request.uri().toString()}")
 
-            val response = client.send(request, HttpResponse.BodyHandlers.ofInputStream())
-            val mavenSearchModel = jacksonObjectMapper().readValue<MavenSearchModel>(response.body())
+                val response = client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+                val mavenSearchModel = jacksonObjectMapper().readValue<MavenSearchModel>(response.body())
 
-            packages.addAll(mavenSearchModel.response.docs
-                .filter { it.repositoryId == "central" } // only from maven central
-                .map { "${it.id}:${it.latestVersion}" }.toSet()
-            )
-        }
+                packages.addAll(mavenSearchModel.response.docs
+                    .filter { it.repositoryId == "central" } // only from maven central
+                    .map { "${it.id}:${it.latestVersion}" }.toSet()
+                )
+            }
 
 //                println(packages.toString())
         librariesFromMavenCentral = File.createTempFile("Libraries_List_From_Maven_Central", ".txt")
@@ -145,10 +147,13 @@ class DependencyMavenDataExtractor {
         println("Raw packages count: ${uniquePackages.size}")
 
         val packagesDoesntExist = mutableSetOf<String>()
-        uniquePackages.parallelStream().forEach {
-            if (!checkIsDependencyAvailable(it)) {
-                println("Package $it doesn't exist")
-                packagesDoesntExist.add(it)
+        uniquePackages.forEachIndexed { index, item ->
+            if (index % 100 == 0) // every N request
+                println("Checking package existence: ${index * 100.0 / uniquePackages.size} %")
+
+            if (!checkIsDependencyAvailable(item)) {
+//                println("Package $item doesn't exist")
+                packagesDoesntExist.add(item)
             }
         }
 
@@ -156,17 +161,20 @@ class DependencyMavenDataExtractor {
 
         println("Count of packages, that weren't found ${packagesDoesntExist.size}. Packages, that exist: ${uniquePackages.size}")
 
+        val notExistPackagesFile = File.createTempFile("Not_Existed_Packages", ".txt")
+        BufferedWriter(FileWriter(notExistPackagesFile)).use { writer ->
+            packagesDoesntExist.forEach { writer.write(it + System.lineSeparator()) }
+        }
+        println("Packages, that weren't found on Maven Central has been written to file: ${notExistPackagesFile.path}")
+
+
         val outputFile = File.createTempFile("Libraries_Final_List", ".txt")
 
         BufferedWriter(FileWriter(outputFile)).use { writer ->
-            // first - write dependencies from "real life project", then - parsed from Maven Central
-            val finalSet = baseDependencies.intersect(uniquePackages).toMutableList()
-                .also { it.addAll(parsedDependencies.intersect(uniquePackages)) }
-
-            finalSet.forEach { writer.write(it + System.lineSeparator()) }
+            uniquePackages.shuffled().forEach { writer.write(it + System.lineSeparator()) }
         }
 
-        println("List with final packages (that do exist) has been written to file: ${librariesFromMavenCentral.path}")
+        println("List with final packages (that do exist) has been written to file: ${outputFile.path}")
     }
 
     @Test
@@ -176,8 +184,6 @@ class DependencyMavenDataExtractor {
     }
 
     fun checkIsDependencyAvailable(dependencyFullName: String): Boolean {
-        val client = HttpClient.newHttpClient()
-
         val parts = dependencyFullName.split(':')
 
         // fr.mastah.maven.plugin.m2e.jsdoc3
