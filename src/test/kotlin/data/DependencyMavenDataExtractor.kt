@@ -92,36 +92,35 @@ class DependencyMavenDataExtractor {
         val twoLetterCombination =
             LETTERS.flatMap { firstLetter -> LETTERS.map { secondLetter -> firstLetter.toString() + secondLetter } }
 
-        LETTERS.map { it.toString() }.toMutableList()
-            .apply {
-                addAll(twoLetterCombination)
+        val queries = LETTERS.map { it.toString() }.toMutableList().also { it.addAll(twoLetterCombination) }
 
-                forEach { query ->
-                    val request =
-                        HttpRequest.newBuilder(URI("https://search.maven.org/solrsearch/select?q=$query&rows=10000&wt=json"))
-                            .GET()
-                            .build()
+        queries.forEachIndexed { index, query ->
+            println("Parsing maven central search index: ${index * 100.0 / queries.size} %")
+
+            val request =
+                HttpRequest.newBuilder(URI("https://search.maven.org/solrsearch/select?q=$query&rows=10000&wt=json"))
+                    .GET()
+                    .build()
 
 //                    println("Request: ${request.uri().toString()}")
 
-                    val response = client.send(request, HttpResponse.BodyHandlers.ofInputStream())
-                    val mavenSearchModel = jacksonObjectMapper().readValue<MavenSearchModel>(response.body())
+            val response = client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            val mavenSearchModel = jacksonObjectMapper().readValue<MavenSearchModel>(response.body())
 
-                    packages.addAll(mavenSearchModel.response.docs
-                        .filter { it.repositoryId == "central" } // only from maven central
-                        .map { "${it.id}:${it.latestVersion}" }.toSet()
-                    )
-                }
+            packages.addAll(mavenSearchModel.response.docs
+                .filter { it.repositoryId == "central" } // only from maven central
+                .map { "${it.id}:${it.latestVersion}" }.toSet()
+            )
+        }
 
 //                println(packages.toString())
-                librariesFromMavenCentral = File.createTempFile("Libraries_List_From_Maven_Central", ".txt")
+        librariesFromMavenCentral = File.createTempFile("Libraries_List_From_Maven_Central", ".txt")
 
-                BufferedWriter(FileWriter(librariesFromMavenCentral)).use { writer ->
-                    packages.forEach { writer.write(it + System.lineSeparator()) }
-                }
+        BufferedWriter(FileWriter(librariesFromMavenCentral)).use { writer ->
+            packages.forEach { writer.write(it + System.lineSeparator()) }
+        }
 
-                println("Packages has been written to file: ${librariesFromMavenCentral.path}")
-            }
+        println("Packages has been written to file: ${librariesFromMavenCentral.path}")
     }
 
     @Test
