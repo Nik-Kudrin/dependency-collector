@@ -164,8 +164,8 @@ class DependencyMavenDataExtractor {
 
         var inputSet = baseDependencies.plus(parsedDependencies)
 
-        val totalNotFoundFile = File.createTempFile("TOTAL_NOT_FOUND", ".txt")
-        val totalExistFile = File.createTempFile("TOTAL_EXIST", ".txt")
+        val totalNotFoundFile = File.createTempFile("TOTAL_PACKAGES_NOT_FOUND", ".txt")
+        val totalExistFile = File.createTempFile("TOTAL_PACKAGES_EXIST", ".txt")
 
         do {
             countOfHttpException = 0
