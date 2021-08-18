@@ -16,7 +16,7 @@ class ImportGenerator {
 
     @Test
     fun printDependencyImports() {
-        var stream = ImportGenerator::class.java.classLoader.getResourceAsStream("Libraries_Final_List.txt")
+        var stream = ImportGenerator::class.java.classLoader.getResourceAsStream("TOTAL_PACKAGES_EXIST.txt")
         val packages = BufferedReader(stream.reader()).readLines()
 
         BufferedWriter(FileWriter("/home/neon/Downloads/dependencies.txt")).use { writer ->

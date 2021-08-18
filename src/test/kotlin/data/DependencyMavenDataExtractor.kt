@@ -71,12 +71,13 @@ class DependencyMavenDataExtractor {
             DependencyMavenDataExtractor::class.java.classLoader.getResourceAsStream("Base_Dependencies_List.txt")
 
         val rawPackages = stream.bufferedReader().readLines()
-            .filter { it.contains("Maven: ") || it.contains("Gradle: ") }
+//            .filter { it.contains("Maven: ") || it.contains("Gradle: ") }
             .map {
-                it.removePrefix("implementation Maven:")
-                    .removePrefix("Maven:")
-                    .removePrefix("implementation Gradle:")
-                    .removePrefix("Gradle:")
+                it
+//                    .removePrefix("implementation Maven:")
+//                    .removePrefix("Maven:")
+//                    .removePrefix("implementation Gradle:")
+//                    .removePrefix("Gradle:")
                     .trim()
             }
 
@@ -148,14 +149,15 @@ class DependencyMavenDataExtractor {
     @ExperimentalTime
     @Test
     fun mergePackagesCached() {
-        //        extractAndCleanupPackageDataFromCommonListOfPackages()
+        extractAndCleanupPackageDataFromCommonListOfPackages()
 //        getMavenCentralPackagesList()
 
-        cleanBaseDependenciesFile = Path.of("/tmp/Clean_Base_Dependencies_List8591417797809616084.txt").toFile()
-        librariesFromMavenCentral = Path.of("/tmp/Libraries_List_From_Maven_Central13161733866809064272.txt").toFile()
+//        cleanBaseDependenciesFile = Path.of("/tmp/Clean_Base_Dependencies_List8591417797809616084.txt").toFile()
+//        librariesFromMavenCentral = Path.of("/tmp/Libraries_List_From_Maven_Central13161733866809064272.txt").toFile()
 
         val baseDependencies = readFileToSet(cleanBaseDependenciesFile)//.take(3000).toSet()
-        val parsedDependencies = readFileToSet(librariesFromMavenCentral)//.take(3000).toSet()
+//        val parsedDependencies = readFileToSet(librariesFromMavenCentral)//.take(3000).toSet()
+        val parsedDependencies = mutableSetOf<String>()
 
         // store partially processed packages
 
