@@ -1,6 +1,7 @@
 package data
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import kotlinx.coroutines.delay
@@ -15,6 +16,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Path
+import kotlin.io.path.Path
 import kotlin.random.Random
 import kotlin.random.nextInt
 import kotlin.time.Duration
@@ -39,19 +41,41 @@ private data class MavenSearchModel(
     val response: MavenSearchResponse
 )
 
+private data class DependencyData(
+    val type: String,
+    val group: String,
+    val name: String,
+    val version: String
+)
+
 /**
  * DO NOT RUN THESE TESTS ON CI. ONLY FOR LOCAL DATA PREPARATION
  */
 class DependencyMavenDataExtractor {
     private lateinit var cleanBaseDependenciesFile: File
     private lateinit var librariesFromMavenCentral: File
+    private lateinit var parsedFromRepos: File
     private val countOfExceptionThreshold = 3
     private var countOfHttpException: Int = 0
 
     private fun getDistinctPackages(packages: Iterable<String>): Set<String> {
+        // Package: x:y:version
         val groupedPackages = packages
+            // Key: x:y
             .groupBy(keySelector = { it.split(":").take(2).joinToString(separator = ":") },
+                // Value: version
                 valueTransform = { it.split(":").last() }
+            )
+
+        // Select package with max version
+        val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
+        return uniquePackages
+    }
+
+    private fun getDistinctPackages(packages: Set<DependencyData>): Set<String> {
+        val groupedPackages = packages
+            .groupBy(keySelector = { "${it.group}:${it.name}" },
+                valueTransform = { it.version }
             )
 
         val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
@@ -145,6 +169,217 @@ class DependencyMavenDataExtractor {
             iterable.forEach { writer.write(it + System.lineSeparator()) }
         }
     }
+
+    private fun String.replaceQuotesInDependencyDeclaration() = this.replace("\"", "").replace("\'", "").trim()
+
+    private fun convertMavenScopeToGradleDependencyType(scope: String) = when (scope) {
+        "test" -> "testImplementation"
+        "compile" -> "implementation"
+        "runtime" -> "runtimeOnly"
+        else -> "implementation"
+    }
+
+    private fun parseMavenDependencies(entry: Map.Entry<File, List<String>>): Set<DependencyData> {
+        if (entry.key.isDirectory || entry.key.name != "pom.xml") return emptySet()
+
+        val dependencies = HashSet<DependencyData>(50)
+
+        try {
+            val mavenProject =
+                XmlMapper().readValue<MavenProject>(entry.value.joinToString(separator = System.lineSeparator()))
+            val mavenDependencies = mavenProject.dependencies ?: listOf()
+            mavenDependencies
+                .plus(mavenProject.dependencyManagement?.dependencies ?: listOf())
+                .forEach {
+                    dependencies.add(
+                        DependencyData(
+                            type = convertMavenScopeToGradleDependencyType(it.scope ?: ""),
+                            group = it.groupId,
+                            name = it.artifactId,
+                            version = it.version ?: ""
+                        )
+                    )
+                }
+        } catch (e: Exception) {
+            System.err.println("Failed on file ${entry.key.absolutePath}")
+        }
+
+        return dependencies
+    }
+
+    /**
+     * @return Map <dependency, dependencyType>. E.g.: junit:junit:4.13.2 | testImplementation
+     */
+    private fun parseGradleDependencies(entry: Map.Entry<File, List<String>>): Set<DependencyData> {
+        if (entry.key.isDirectory || entry.key.extension != "gradle") return emptySet()
+
+        val dependencies = HashSet<DependencyData>(50)
+
+        fun addDependencyToSet(pieces: List<String>) {
+            // pieces => dependency type; group; name; version
+            if (pieces.size == 4)
+                dependencies.add(
+                    DependencyData(type = pieces[0], group = pieces[1], name = pieces[2], version = pieces[3])
+                )
+        }
+
+        val dependenciesFromFile = entry.value.filter {
+            val trimmed = it.trim()
+            trimmed.startsWith("implementation") ||
+                    trimmed.startsWith("testImplementation") ||
+                    trimmed.startsWith("runtimeOnly")
+        }
+
+        for (rawDependency in dependenciesFromFile) {
+            val pieces = getGradleRawDependencyPieces(rawDependency)
+            addDependencyToSet(pieces)
+        }
+
+        return dependencies
+    }
+
+    /**
+     * Options:
+    testImplementation("junit:junit:4.13.2")
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation "junit:junit:4.13.2"
+    testImplementation group: 'junit', name: 'junit', version: '4.13.2'
+    testImplementation group: "junit", name: "junit", version: "4.13.2"
+     */
+    private fun getGradleRawDependencyPieces(rawDependencyString: String): List<String> {
+        if (rawDependencyString.contains(" group:")) {
+            val pieces = rawDependencyString.split("group", "name", "version", ":", ",").map {
+                it.replaceQuotesInDependencyDeclaration()
+            }.filter { it.isNotBlank() }
+
+            return pieces
+        } else {
+            val pieces = rawDependencyString.split("(", ")", ":").map {
+                it.replaceQuotesInDependencyDeclaration()
+            }.filter { it.isNotBlank() }
+
+            return pieces
+        }
+    }
+
+    @ExperimentalTime
+    @Test
+    fun harvestBuildDependenciesFromRepos() {
+        val dependencies = HashSet<DependencyData>(5_000)
+
+        val gitHubDir = Path("/opt/GitHub")
+        val jetBrainsInternalRepo = Path("/opt/REPO/intellij/out/perf-startup/cache/projects/zip")
+
+        val buildToolsConfigFiles = gitHubDir.toFile().walkTopDown()
+            .plus(jetBrainsInternalRepo.toFile().walkTopDown())
+            .filter { it.isFile && it.extension in listOf("xml", "gradle", "settings", "properties") }
+            .toList()
+
+        val cachedFileContent = HashMap<File, List<String>>(buildToolsConfigFiles.size)
+
+        println("Start caching ${buildToolsConfigFiles.size} files ...")
+        buildToolsConfigFiles.forEach { file ->
+            cachedFileContent[file] = file.readLines()
+        }
+        println("Caching finished")
+
+        cachedFileContent.forEach {
+            dependencies.addAll(parseMavenDependencies(it))
+            dependencies.addAll(parseGradleDependencies(it))
+        }
+
+        println("Count of raw parsed dependencies: ${dependencies.size}")
+
+        dependencies.removeIf {
+            it.group.contains(" ") || it.group.contains("$")
+                    || it.name.contains(" ") || it.name.contains("$")
+        }
+
+        // find dependencies, where has been used variable in dependency version
+        val dependenciesWithVariableInVersion = dependencies.filter { it.version.startsWith("$") }
+        println("Dependencies with variable in version: ${dependenciesWithVariableInVersion.size}")
+
+        var foundVariables = 0
+        for (dependencyData in dependenciesWithVariableInVersion) {
+            // remove dependency from final source (it will be readded, if everything will go well ;)
+            dependencies.remove(dependencyData)
+
+            val variableName = dependencyData.version.removePrefix("\${").removeSuffix("}")
+
+            val entryWithVariable =
+                cachedFileContent.entries.firstOrNull { entry -> entry.value.any { it.contains(variableName) } }
+
+            if (entryWithVariable == null) continue
+            else {
+                val lineWithVariable = entryWithVariable.value.first { line -> line.contains(variableName) }.trim()
+
+                var versionValue = ""
+                if (entryWithVariable.key.extension == "xml") // maven
+                    versionValue = lineWithVariable
+                        .split("<", ">", variableName).filter { it.trim().isNotBlank() }
+                        .joinToString(separator = "")
+                else {
+                    versionValue = lineWithVariable
+                        .split("ext", "[", "]", "'", "\"", "=", variableName).filter { it.trim().isNotBlank() }
+                        .joinToString(separator = "")
+                }
+
+                versionValue = versionValue.replace("/", "").trim()
+                if (versionValue.contains(" ") || versionValue.contains("$"))
+                    continue
+
+                val actualizedData = dependencyData.copy(version = versionValue)
+                dependencies.add(actualizedData)
+                foundVariables++
+                println("Found variables: $foundVariables $actualizedData")
+            }
+        }
+
+        println("Count of dependencies with substituted variable in version: $foundVariables")
+        println("Final size of dependencies: ${dependencies.size}")
+
+        val cleanedPackages = getDistinctPackages(dependencies)
+        parsedFromRepos = File.createTempFile("Parsed_From_Repos", ".txt")
+        writeIterableToFile(cleanedPackages, parsedFromRepos)
+        println("Cleaned packages ${cleanedPackages.size} stored to file: ${parsedFromRepos.path}")
+    }
+
+    @ExperimentalTime
+    @Test
+    fun checkParsedPackagesFromRepo() {
+        harvestBuildDependenciesFromRepos()
+        var inputSet = readFileToSet(parsedFromRepos)
+
+        // store partially processed packages
+        val notFoundPackages = mutableSetOf<String>()
+        val existedPackages = mutableSetOf<String>()
+
+        val totalNotFoundFile = File.createTempFile("TOTAL_PARSED_PACKAGES_NOT_FOUND", ".txt")
+        val totalExistFile = File.createTempFile("TOTAL_PARSED_PACKAGES_EXIST", ".txt")
+
+        do {
+            countOfHttpException = 0
+            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackages(emptySet(), inputSet)
+
+            notFoundPackages.addAll(readFileToSet(packagesNotFoundFilePath))
+            existedPackages.addAll(readFileToSet(existedPackagesFilePath))
+
+            writeIterableToFile(notFoundPackages, totalNotFoundFile)
+            println("SUBTOTAL ${notFoundPackages.size} NOT FOUND PACKAGES FILE: ${totalNotFoundFile.path}")
+
+            writeIterableToFile(existedPackages, totalExistFile)
+            println("SUBTOTAL ${existedPackages.size} EXIST PACKAGES FILE: ${totalExistFile.path}")
+
+            runBlocking { delay(Duration.seconds(60)) }
+
+            inputSet = inputSet.minus(notFoundPackages).minus(existedPackages)
+            println("Left to check packages: ${inputSet.size}")
+
+        } while (inputSet.isNotEmpty())
+
+        println("====== THE END ============")
+    }
+
 
     @ExperimentalTime
     @Test
