@@ -325,7 +325,13 @@ class DependencyMavenDataExtractor {
                 }
 
                 versionValue = versionValue.replace("/", "").trim()
-                if (versionValue.contains(" ") || versionValue.contains("$"))
+                if (versionValue.isBlank() ||
+                    versionValue.contains(" ") ||
+                    versionValue.contains("$") ||
+                    versionValue.contains("{") ||
+                    versionValue.contains("}") ||
+                    versionValue.contains("@")
+                )
                     continue
 
                 val actualizedData = dependencyData.copy(version = versionValue)
