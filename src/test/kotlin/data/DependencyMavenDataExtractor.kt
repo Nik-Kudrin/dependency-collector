@@ -365,7 +365,7 @@ class DependencyMavenDataExtractor {
 
         do {
             countOfHttpException = 0
-            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackages(emptySet(), inputSet)
+            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackagSetsAndCheck(inputSet)
 
             notFoundPackages.addAll(readFileToSet(packagesNotFoundFilePath))
             existedPackages.addAll(readFileToSet(existedPackagesFilePath))
@@ -412,7 +412,7 @@ class DependencyMavenDataExtractor {
 
         do {
             countOfHttpException = 0
-            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackages(emptySet(), inputSet)
+            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackagSetsAndCheck(inputSet)
 
             notFoundPackages.addAll(readFileToSet(packagesNotFoundFilePath))
             existedPackages.addAll(readFileToSet(existedPackagesFilePath))
@@ -433,12 +433,8 @@ class DependencyMavenDataExtractor {
         println("====== THE END ============")
     }
 
-    @ExperimentalTime
-//    @Test
-    fun mergePackages(firstSet: Set<String>, secondSet: Set<String>): Pair<String, String> {
-
-        val uniquePackages = getDistinctPackages(firstSet.toMutableSet().also { it.addAll(secondSet) })
-            .toMutableSet()
+    private fun mergePackagSetsAndCheck(packageSet: Set<String>): Pair<String, String> {
+        val uniquePackages = getDistinctPackages(packageSet)
 
         println("Raw packages count: ${uniquePackages.size}")
 
@@ -456,7 +452,7 @@ class DependencyMavenDataExtractor {
             }
 
             if (!checkIsDependencyAvailable(item)) {
-//                println("Package $item doesn't exist")
+                // System.err.println("Package $item doesn't exist")
                 packagesNotFound.add(item)
             } else {
                 existedPackages.add(item)
@@ -471,7 +467,7 @@ class DependencyMavenDataExtractor {
 
 
         val finalList = File.createTempFile("Libraries_Final_List", ".txt")
-        writeIterableToFile(existedPackages.shuffled(), finalList)
+        writeIterableToFile(existedPackages, finalList)
 
         println("List with final packages (that do exist) has been written to file: ${finalList.path}")
 

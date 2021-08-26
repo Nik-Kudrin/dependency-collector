@@ -19,6 +19,7 @@ dependencies {
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.12.4'
 
     testImplementation 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
+    implementation 'org.kohsuke:github-api:1.132'
 }
 
 test {
