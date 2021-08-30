@@ -27,3 +27,9 @@ test {
     minHeapSize = "256m"
     maxHeapSize = "8192m"
 }
+
+compileKotlin {
+    kotlinOptions.jvmTarget = "11"
+    sourceCompatibility = "11"
+    targetCompatibility = "11"
+}

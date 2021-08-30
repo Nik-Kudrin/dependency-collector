@@ -4,8 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.Test
 import java.io.*
@@ -41,16 +40,14 @@ private data class MavenSearchModel(
     val response: MavenSearchResponse
 )
 
-private data class DependencyData(
+data class DependencyData(
     val type: String,
     val group: String,
     val name: String,
     val version: String
 )
 
-/**
- * DO NOT RUN THESE TESTS ON CI. ONLY FOR LOCAL DATA PREPARATION
- */
+@ExperimentalTime
 class DependencyMavenDataExtractor {
     private lateinit var cleanBaseDependenciesFile: File
     private lateinit var librariesFromMavenCentral: File
@@ -58,52 +55,197 @@ class DependencyMavenDataExtractor {
     private val countOfExceptionThreshold = 3
     private var countOfHttpException: Int = 0
 
-    private fun getDistinctPackages(packages: Iterable<String>): Set<String> {
-        // Package: x:y:version
-        val groupedPackages = packages
-            // Key: x:y
-            .groupBy(keySelector = { it.split(":").take(2).joinToString(separator = ":") },
-                // Value: version
-                valueTransform = { it.split(":").last() }
+    companion object {
+        private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        fun getDistinctPackages(packages: Iterable<String>): Set<String> {
+            // Package: x:y:version
+            val groupedPackages = packages
+                // Key: x:y
+                .groupBy(keySelector = { it.split(":").take(2).joinToString(separator = ":") },
+                    // Value: version
+                    valueTransform = { it.split(":").last() }
+                )
+
+            // Select package with max version
+            val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
+            return uniquePackages
+        }
+
+        fun getDistinctPackages(packages: Set<DependencyData>): Set<String> {
+            val groupedPackages = packages
+                .groupBy(keySelector = { "${it.group}:${it.name}" },
+                    valueTransform = { it.version }
+                )
+
+            val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
+            println("Filter ${uniquePackages.size} unique packages from ${packages.size} raw packages")
+            return uniquePackages
+        }
+
+        fun String.replaceQuotesInDependencyDeclaration() = this.replace("\"", "").replace("\'", "").trim()
+
+        fun convertMavenScopeToGradleDependencyType(scope: String) = when (scope) {
+            "test" -> "testImplementation"
+            "compile" -> "implementation"
+            "runtime" -> "runtimeOnly"
+            else -> "implementation"
+        }
+
+        fun parseMavenDependencies(entry: Map.Entry<File, List<String>>): Set<DependencyData> {
+            if (entry.key.isDirectory || entry.key.name != "pom.xml") return emptySet()
+
+            return try {
+                parseMavenDependencies(
+                    entry.key.name,
+                    entry.value.joinToString(separator = System.lineSeparator())
+                )
+            } catch (e: Exception) {
+                System.err.println("Failed on file ${entry.key.absolutePath}")
+                emptySet<DependencyData>()
+            }
+        }
+
+        fun parseMavenDependencies(fileName: String, content: String): Set<DependencyData> {
+            if (!fileName.contains("pom.xml")) return emptySet()
+
+            val dependencies = HashSet<DependencyData>(50)
+
+            try {
+                var mavenProject: MavenProject? = null
+                val job = scope.async { mavenProject = XmlMapper().readValue<MavenProject>(content) }
+
+                runBlocking { withTimeout(2_000) { job.await() } }
+
+                val mavenDependencies = mavenProject!!.dependencies ?: listOf()
+                mavenDependencies
+                    .plus(mavenProject!!.dependencyManagement?.dependencies ?: listOf())
+                    .forEach {
+                        dependencies.add(
+                            DependencyData(
+                                type = convertMavenScopeToGradleDependencyType(it.scope ?: ""),
+                                group = it.groupId,
+                                name = it.artifactId,
+                                version = it.version ?: ""
+                            )
+                        )
+                    }
+            } catch (e: Exception) {
+                System.err.println("Failed on file $fileName. ${e.message}")
+                return emptySet()
+            }
+
+            return dependencies
+        }
+
+        fun parseGradleDependencies(entry: Map.Entry<File, List<String>>): Set<DependencyData> {
+            if (entry.key.isDirectory || entry.key.extension != "gradle") return emptySet()
+
+            return parseGradleDependencies(
+                entry.key.name,
+                entry.value.joinToString(separator = System.lineSeparator())
             )
+        }
 
-        // Select package with max version
-        val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
-        return uniquePackages
-    }
+        // file name | file content
+        fun parseGradleDependencies(fileName: String, content: String): Set<DependencyData> {
+            if (!fileName.contains("gradle")) return emptySet()
 
-    private fun getDistinctPackages(packages: Set<DependencyData>): Set<String> {
-        val groupedPackages = packages
-            .groupBy(keySelector = { "${it.group}:${it.name}" },
-                valueTransform = { it.version }
-            )
+            val dependencies = HashSet<DependencyData>(50)
 
-        val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
-        return uniquePackages
+            fun addDependencyToSet(pieces: List<String>) {
+                // pieces => dependency type; group; name; version
+                if (pieces.size == 4)
+                    dependencies.add(
+                        DependencyData(type = pieces[0], group = pieces[1], name = pieces[2], version = pieces[3])
+                    )
+            }
+
+            val dependenciesFromFile = content.split(System.lineSeparator()).filter {
+                val trimmed = it.trim()
+                trimmed.startsWith("implementation") ||
+                        trimmed.startsWith("testImplementation") ||
+                        trimmed.startsWith("runtimeOnly")
+            }
+
+            for (rawDependency in dependenciesFromFile) {
+                val pieces = getGradleRawDependencyPieces(rawDependency)
+                addDependencyToSet(pieces)
+            }
+
+            return dependencies
+        }
+
+        /**
+         * Options:
+        testImplementation("junit:junit:4.13.2")
+        testImplementation 'junit:junit:4.13.2'
+        testImplementation "junit:junit:4.13.2"
+        testImplementation group: 'junit', name: 'junit', version: '4.13.2'
+        testImplementation group: "junit", name: "junit", version: "4.13.2"
+         */
+        fun getGradleRawDependencyPieces(rawDependencyString: String): List<String> {
+            if (rawDependencyString.contains(" group:")) {
+                val pieces = rawDependencyString.split("group", "name", "version", ":", ",").map {
+                    it.replaceQuotesInDependencyDeclaration()
+                }.filter { it.isNotBlank() }
+
+                return pieces
+            } else {
+                val pieces = rawDependencyString.split("(", ")", ":").map {
+                    it.replaceQuotesInDependencyDeclaration()
+                }.filter { it.isNotBlank() }
+
+                return pieces
+            }
+        }
+
+        fun cleanupDependencies(dependencies: HashSet<DependencyData>): Unit {
+            println("Count of raw parsed dependencies: ${dependencies.size}")
+            val pattern = Regex("[\$ {}@><=]")
+
+            dependencies.removeIf {
+                it.group.contains(regex = pattern)
+                        || it.name.contains(regex = pattern)
+                        || it.version.contains(regex = pattern)
+            }
+
+            println("Dependencies after cleanup: ${dependencies.size}")
+        }
+
+        fun readFileToSet(filePath: File): Set<String> = readFileToSet(filePath.path)
+
+        fun readFileToSet(filePath: String): Set<String> {
+            BufferedReader(FileReader(filePath)).use {
+                return it.readLines().toSet()
+            }
+        }
+
+        fun writeIterableToFile(iterable: Iterable<String>, file: File) {
+            if (file.exists()) {
+                file.delete()
+                file.createNewFile()
+            }
+
+            BufferedWriter(FileWriter(file)).use { writer ->
+                iterable.forEach { writer.write(it + System.lineSeparator()) }
+            }
+        }
     }
 
     private fun getRandomSymbol(): Char = LETTERS[Random.nextInt(LETTERS.indices)]
 
     private fun getResourcesBasePath(): Path {
-        val resourceUrl = DependencyMavenDataExtractor::class.java.classLoader.getResource("Base_Dependencies_List.txt")
+        val resourceUrl = DependencyMavenDataExtractor::class.java.classLoader.getResource("Raw_Packages_For_Check_And_Distinct.txt")
         return Path.of(resourceUrl.toString()).parent
     }
 
     @Test
     fun extractAndCleanupPackageDataFromCommonListOfPackages() {
         val stream =
-            DependencyMavenDataExtractor::class.java.classLoader.getResourceAsStream("Base_Dependencies_List.txt")
+            DependencyMavenDataExtractor::class.java.classLoader.getResourceAsStream("Raw_Packages_For_Check_And_Distinct.txt")
 
-        val rawPackages = stream.bufferedReader().readLines()
-//            .filter { it.contains("Maven: ") || it.contains("Gradle: ") }
-            .map {
-                it
-//                    .removePrefix("implementation Maven:")
-//                    .removePrefix("Maven:")
-//                    .removePrefix("implementation Gradle:")
-//                    .removePrefix("Gradle:")
-                    .trim()
-            }
+        val rawPackages = stream.bufferedReader().readLines().map { it.trim() }
 
         val uniquePackages = getDistinctPackages(rawPackages)
 
@@ -149,117 +291,6 @@ class DependencyMavenDataExtractor {
         writeIterableToFile(packages, librariesFromMavenCentral)
 
         println("Packages has been written to file: ${librariesFromMavenCentral.path}")
-    }
-
-    private fun readFileToSet(filePath: File): Set<String> = readFileToSet(filePath.path)
-
-    private fun readFileToSet(filePath: String): Set<String> {
-        BufferedReader(FileReader(filePath)).use {
-            return it.readLines().toSet()
-        }
-    }
-
-    private fun writeIterableToFile(iterable: Iterable<String>, file: File) {
-        if (file.exists()) {
-            file.delete()
-            file.createNewFile()
-        }
-
-        BufferedWriter(FileWriter(file)).use { writer ->
-            iterable.forEach { writer.write(it + System.lineSeparator()) }
-        }
-    }
-
-    private fun String.replaceQuotesInDependencyDeclaration() = this.replace("\"", "").replace("\'", "").trim()
-
-    private fun convertMavenScopeToGradleDependencyType(scope: String) = when (scope) {
-        "test" -> "testImplementation"
-        "compile" -> "implementation"
-        "runtime" -> "runtimeOnly"
-        else -> "implementation"
-    }
-
-    private fun parseMavenDependencies(entry: Map.Entry<File, List<String>>): Set<DependencyData> {
-        if (entry.key.isDirectory || entry.key.name != "pom.xml") return emptySet()
-
-        val dependencies = HashSet<DependencyData>(50)
-
-        try {
-            val mavenProject =
-                XmlMapper().readValue<MavenProject>(entry.value.joinToString(separator = System.lineSeparator()))
-            val mavenDependencies = mavenProject.dependencies ?: listOf()
-            mavenDependencies
-                .plus(mavenProject.dependencyManagement?.dependencies ?: listOf())
-                .forEach {
-                    dependencies.add(
-                        DependencyData(
-                            type = convertMavenScopeToGradleDependencyType(it.scope ?: ""),
-                            group = it.groupId,
-                            name = it.artifactId,
-                            version = it.version ?: ""
-                        )
-                    )
-                }
-        } catch (e: Exception) {
-            System.err.println("Failed on file ${entry.key.absolutePath}")
-        }
-
-        return dependencies
-    }
-
-    /**
-     * @return Map <dependency, dependencyType>. E.g.: junit:junit:4.13.2 | testImplementation
-     */
-    private fun parseGradleDependencies(entry: Map.Entry<File, List<String>>): Set<DependencyData> {
-        if (entry.key.isDirectory || entry.key.extension != "gradle") return emptySet()
-
-        val dependencies = HashSet<DependencyData>(50)
-
-        fun addDependencyToSet(pieces: List<String>) {
-            // pieces => dependency type; group; name; version
-            if (pieces.size == 4)
-                dependencies.add(
-                    DependencyData(type = pieces[0], group = pieces[1], name = pieces[2], version = pieces[3])
-                )
-        }
-
-        val dependenciesFromFile = entry.value.filter {
-            val trimmed = it.trim()
-            trimmed.startsWith("implementation") ||
-                    trimmed.startsWith("testImplementation") ||
-                    trimmed.startsWith("runtimeOnly")
-        }
-
-        for (rawDependency in dependenciesFromFile) {
-            val pieces = getGradleRawDependencyPieces(rawDependency)
-            addDependencyToSet(pieces)
-        }
-
-        return dependencies
-    }
-
-    /**
-     * Options:
-    testImplementation("junit:junit:4.13.2")
-    testImplementation 'junit:junit:4.13.2'
-    testImplementation "junit:junit:4.13.2"
-    testImplementation group: 'junit', name: 'junit', version: '4.13.2'
-    testImplementation group: "junit", name: "junit", version: "4.13.2"
-     */
-    private fun getGradleRawDependencyPieces(rawDependencyString: String): List<String> {
-        if (rawDependencyString.contains(" group:")) {
-            val pieces = rawDependencyString.split("group", "name", "version", ":", ",").map {
-                it.replaceQuotesInDependencyDeclaration()
-            }.filter { it.isNotBlank() }
-
-            return pieces
-        } else {
-            val pieces = rawDependencyString.split("(", ")", ":").map {
-                it.replaceQuotesInDependencyDeclaration()
-            }.filter { it.isNotBlank() }
-
-            return pieces
-        }
     }
 
     @ExperimentalTime
