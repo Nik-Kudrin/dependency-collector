@@ -1,10 +1,11 @@
 package data
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import kotlinx.coroutines.*
+import model.DependencyData
+import model.MavenSearchModel
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.Test
 import java.io.*
@@ -22,30 +23,6 @@ import kotlin.time.Duration
 import kotlin.time.ExperimentalTime
 
 private val LETTERS = "abcdefghijklmnopqrstuvwxyz"
-
-@JsonIgnoreProperties(ignoreUnknown = true)
-private data class MavenSearchResponseDoc(
-    val id: String,
-    val latestVersion: String,
-    val repositoryId: String
-)
-
-@JsonIgnoreProperties(ignoreUnknown = true)
-private data class MavenSearchResponse(
-    val docs: List<MavenSearchResponseDoc>
-)
-
-@JsonIgnoreProperties(ignoreUnknown = true)
-private data class MavenSearchModel(
-    val response: MavenSearchResponse
-)
-
-data class DependencyData(
-    val type: String,
-    val group: String,
-    val name: String,
-    val version: String
-)
 
 @ExperimentalTime
 class DependencyMavenDataExtractor {
@@ -79,7 +56,7 @@ class DependencyMavenDataExtractor {
                 )
 
             val uniquePackages = groupedPackages.map { "${it.key}:${it.value.maxOrNull()}" }.toSet()
-            println("Filter ${uniquePackages.size} unique packages from ${packages.size} raw packages")
+            println("Filtered ${uniquePackages.size} unique packages from ${packages.size} raw packages")
             return uniquePackages
         }
 
@@ -236,7 +213,8 @@ class DependencyMavenDataExtractor {
     private fun getRandomSymbol(): Char = LETTERS[Random.nextInt(LETTERS.indices)]
 
     private fun getResourcesBasePath(): Path {
-        val resourceUrl = DependencyMavenDataExtractor::class.java.classLoader.getResource("Raw_Packages_For_Check_And_Distinct.txt")
+        val resourceUrl =
+            DependencyMavenDataExtractor::class.java.classLoader.getResource("Raw_Packages_For_Check_And_Distinct.txt")
         return Path.of(resourceUrl.toString()).parent
     }
 
@@ -253,6 +231,7 @@ class DependencyMavenDataExtractor {
         cleanBaseDependenciesFile = File.createTempFile("Clean_Base_Dependencies_List", ".txt")
 
         writeIterableToFile(uniquePackages, cleanBaseDependenciesFile)
+        println("Unique ${uniquePackages.size} packages stored to file: ${cleanBaseDependenciesFile.path}")
     }
 
     @Test
@@ -298,11 +277,11 @@ class DependencyMavenDataExtractor {
     fun harvestBuildDependenciesFromRepos() {
         val dependencies = HashSet<DependencyData>(5_000)
 
-        val gitHubDir = Path("/opt/GitHub")
-        val jetBrainsInternalRepo = Path("/opt/REPO/intellij/out/perf-startup/cache/projects/zip")
+        val gitHubDir = Path("/opt/REPO")
+//        val jetBrainsInternalRepo = Path("/opt/REPO")
 
         val buildToolsConfigFiles = gitHubDir.toFile().walkTopDown()
-            .plus(jetBrainsInternalRepo.toFile().walkTopDown())
+//            .plus(jetBrainsInternalRepo.toFile().walkTopDown())
             .filter { it.isFile && it.extension in listOf("xml", "gradle", "settings", "properties") }
             .toList()
 
@@ -396,7 +375,7 @@ class DependencyMavenDataExtractor {
 
         do {
             countOfHttpException = 0
-            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackagSetsAndCheck(inputSet)
+            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackageSetsAndCheck(inputSet)
 
             notFoundPackages.addAll(readFileToSet(packagesNotFoundFilePath))
             existedPackages.addAll(readFileToSet(existedPackagesFilePath))
@@ -443,7 +422,7 @@ class DependencyMavenDataExtractor {
 
         do {
             countOfHttpException = 0
-            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackagSetsAndCheck(inputSet)
+            val (packagesNotFoundFilePath, existedPackagesFilePath) = mergePackageSetsAndCheck(inputSet)
 
             notFoundPackages.addAll(readFileToSet(packagesNotFoundFilePath))
             existedPackages.addAll(readFileToSet(existedPackagesFilePath))
@@ -464,7 +443,7 @@ class DependencyMavenDataExtractor {
         println("====== THE END ============")
     }
 
-    private fun mergePackagSetsAndCheck(packageSet: Set<String>): Pair<String, String> {
+    private fun mergePackageSetsAndCheck(packageSet: Set<String>): Pair<String, String> {
         val uniquePackages = getDistinctPackages(packageSet)
 
         println("Raw packages count: ${uniquePackages.size}")

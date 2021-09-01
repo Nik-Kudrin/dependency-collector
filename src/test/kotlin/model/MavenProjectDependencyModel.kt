@@ -34,5 +34,3 @@ data class MavenProject(
     @JacksonXmlProperty(localName = "dependencies")
     val dependencies: List<MavenDependency>?
 )
-
-//project -> dependencyManagement -> dependencies ->

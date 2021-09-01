@@ -1,11 +1,11 @@
 package data
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import model.DependencyData
+import model.GithubSearchDto
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.Test
 import org.kohsuke.github.GHContent
@@ -22,26 +22,6 @@ import kotlin.time.Duration
 import kotlin.time.ExperimentalTime
 
 const val token = ""
-
-@JsonIgnoreProperties(ignoreUnknown = true)
-private data class GithubSearchDto(
-    // eg: build.gradle
-    val name: String,
-    val path: String,
-    val sha: String,
-    val url: String,
-
-    // raw content
-    @JsonProperty("download_url")
-    val downloadUrl: String,
-
-    // base64
-    val content: String
-) {
-    fun decodeContent(): String {
-        return String(Base64.getMimeDecoder().decode(content))
-    }
-}
 
 @ExperimentalTime
 class GitHubMavenDependencyHarvester {
